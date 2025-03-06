@@ -163,6 +163,40 @@ class Keychain {
     }
     else return false;
   };
+
+  /**Create key from password**/
+  async function deriveKeys(password, salt) {
+    let keyMaterial = await subtle.importKey("raw", stringToBuffer(password), "PBKDF2", false, ["deriveBits"]);
+    let derivedBits = await subtle.deriveBits({name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256"}, keyMaterial, 512);
+    
+    let aesKey = await subtle.importKey("raw", derivedBits.slice(0, 32), "AES-GCM", false, ["encrypt", "decrypt"]);
+    let hmacKey = await subtle.importKey("raw", derivedBits.slice(32), {name: "HMAC", hash: "SHA-256"}, false, ["sign", "verify"]);
+
+    return {aesKey, hmacKey};
+  }
+
+  /**Encryption**/
+  async function encryptPass(aesKey, plaintext) {
+    let iv = getRandomBytes(12);
+    let encrypted = await subtle.encrypt({ name: "AES-GCM", iv }, aesKey, stringToBuffer(plaintext));
+    return { iv: encodeBuffer(iv), data: encodeBuffer(encrypted) };
+    
+  }
+
+  /**Decyption**/
+  async function decryptPass(aesKey, encryptedData) {
+    let iv = decodeBuffer(encryptedData.iv);
+    let data = decodeBuffer(encryptedData.data);
+    let decrypted = await subtle.decrypt({ name: "AES-GCM", iv }, aesKey, data);
+    return bufferToString(decrypted);
+  }
+
+  /*Hide domain name by using HMAC*/
+  async function hashDomain(hmacKey, domain) {
+    let hash = await subtle.sign("HMAC", hmacKey, stringToBuffer(domain));
+    return encodeBuffer(hash);
+  }
+  
 };
 
 module.exports = { Keychain }
