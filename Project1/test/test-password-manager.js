@@ -111,7 +111,7 @@ describe('Password manager', async function() {
         });
     });
 
-    describe.skip('security', async function() {
+    describe('security', async function() {
 
         // Very basic test to make sure you're not doing the most naive thing
         it("doesn't store domain names and passwords in the clear", async function() {
