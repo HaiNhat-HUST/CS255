@@ -21,21 +21,11 @@ class Keychain {
    * Return Type: void
    */
   constructor(password) {
-
     this.masterPassword = password;
-
-    this.data = {
-      /* Store member variables that you intend to be public here
-         (i.e. information that will not compromise security if an adversary sees) */
-    };
-    this.secrets = {
-      /* Store member variables that you intend to be private here
-         (information that an adversary should NOT see). */
-    };
-
-
-
-  };
+    this.salt = getRandomBytes(16); // Generate a random salt for key derivation
+    this.data = {};
+    this.secrets = {};
+  }
 
   /** 
     * Creates an empty keychain with the given password.
@@ -46,9 +36,9 @@ class Keychain {
     */
   static async init(password) {
     let keychain = new Keychain(password);
+    await keychain.deriveKeys(password, keychain.salt); // Derive keys on initialization
     return keychain;
-
-  };
+  }
 
   /**
     * Loads the keychain state from the provided representation (repr). The
@@ -68,28 +58,36 @@ class Keychain {
     * Return Type: Keychain
     */
   static async load(password, repr, trustedDataCheck) {
-
-
     // integrity check with hash
-    const secretsHash = await subtle.digest(
-      "SHA-256", stringToBuffer(repr));            // extract hash from repr
-    if (bufferToString(secretsHash) !== trustedDataCheck) {         // compare extraced hash with trustedDataCheck
+    const secretsHash = await subtle.digest("SHA-256", stringToBuffer(repr));
+    if (bufferToString(secretsHash) !== trustedDataCheck) {
       throw new Error('checksum not match');
     }
 
-
     let kvsState = JSON.parse(repr);
-    let newKeychain = new Keychain(kvsState['masterPassword']);
+    let newKeychain = new Keychain(password);
+    newKeychain.salt = decodeBuffer(kvsState.salt);
 
-    // password check
-    if (newKeychain.masterPassword !== password) {
-      throw new Error('password is wrong');
+    // Derive keys for decryption
+    let { aesKey, hmacKey } = await newKeychain.deriveKeys(password, newKeychain.salt);
+
+    // Decrypt and verify secrets
+    for (let [hashedDomain, encryptedData] of Object.entries(kvsState.kvs)) {
+      let domainBuffer = decodeBuffer(hashedDomain);
+      let domain = bufferToString(domainBuffer);
+
+      // Verify the HMAC
+      let isValid = await subtle.verify("HMAC", hmacKey, domainBuffer, stringToBuffer(domain));
+      if (!isValid) {
+        throw new Error('HMAC verification failed');
+      }
+
+      let decryptedPassword = await newKeychain.decryptPass(aesKey, encryptedData.password);
+      newKeychain.secrets[domain] = decryptedPassword;
     }
 
-    newKeychain.secrets = kvsState['secrets'];
     return newKeychain;
-
-  };
+  }
 
   /**
     * Returns a JSON serialization of the contents of the keychain that can be 
@@ -104,16 +102,26 @@ class Keychain {
     * Return Type: array
     */
   async dump() {
-    let arr = new Array();
-    const kvsState = JSON.stringify(this) // convert the json object to string for hash 
-    console.log(kvsState);
-    arr.push(kvsState);      // arr[0] -> json encoding of password manager
-    let kvsHash = bufferToString(await subtle.digest(
-      "SHA-256", stringToBuffer(kvsState))); // SHA-256 hash for checksum 
-    arr.push(kvsHash);      // arr[1] -> SHA-256 checksum (as a string)
-    return arr;
+    let { aesKey, hmacKey } = await this.deriveKeys(this.masterPassword, this.salt);
 
-  };
+    let kvsState = {
+      salt: encodeBuffer(this.salt),
+      kvs: {}
+    };
+
+    for (let [domain, password] of Object.entries(this.secrets)) {
+      let hashedDomain = await this.hashDomain(hmacKey, domain);
+      let encryptedPassword = await this.encryptPass(aesKey, password);
+      kvsState.kvs[hashedDomain] = {
+        domain: hashedDomain,
+        password: encryptedPassword
+      };
+    }
+
+    let serializedState = JSON.stringify(kvsState);
+    let checksum = bufferToString(await subtle.digest("SHA-256", stringToBuffer(serializedState)));
+    return [serializedState, checksum];
+  }
 
   /**
     * Fetches the data (as a string) corresponding to the given domain from the KVS.
@@ -125,13 +133,8 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
-    let ret = this.secrets[name];
-    if (ret) {
-      return ret;
-    }
-    else return null;
-
-  };
+    return this.secrets[name] || null;
+  }
 
   /** 
   * Inserts the domain and associated data into the KVS. If the domain is
@@ -144,10 +147,8 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    //check if the domain is already exist in kvs
     this.secrets[name] = value;
-    return;
-  };
+  }
 
   /**
     * Removes the record with name from the password manager. Returns true
@@ -159,10 +160,11 @@ class Keychain {
   */
   async remove(name) {
     if (this.secrets[name]) {
-      return delete this.secrets[name];
+      delete this.secrets[name];
+      return true;
     }
-    else return false;
-  };
+    return false;
+  }
 
   /**Create key from password**/
   async deriveKeys(password, salt) {
@@ -173,30 +175,28 @@ class Keychain {
     let hmacKey = await subtle.importKey("raw", derivedBits.slice(32), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 
     return { aesKey, hmacKey };
-  };
+  }
 
   /**Encryption**/
   async encryptPass(aesKey, plaintext) {
     let iv = getRandomBytes(12);
     let encrypted = await subtle.encrypt({ name: "AES-GCM", iv }, aesKey, stringToBuffer(plaintext));
     return { iv: encodeBuffer(iv), data: encodeBuffer(encrypted) };
+  }
 
-  };
-
-  /**Decyption**/
+  /**Decryption**/
   async decryptPass(aesKey, encryptedData) {
     let iv = decodeBuffer(encryptedData.iv);
     let data = decodeBuffer(encryptedData.data);
     let decrypted = await subtle.decrypt({ name: "AES-GCM", iv }, aesKey, data);
     return bufferToString(decrypted);
-  };
+  }
 
   /*Hide domain name by using HMAC*/
   async hashDomain(hmacKey, domain) {
     let hash = await subtle.sign("HMAC", hmacKey, stringToBuffer(domain));
     return encodeBuffer(hash);
-  };
+  }
+}
 
-};
-
-module.exports = { Keychain }
+module.exports = { Keychain };
