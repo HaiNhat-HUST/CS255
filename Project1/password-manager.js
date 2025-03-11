@@ -21,20 +21,12 @@ class Keychain {
    * Return Type: void
    */
   constructor(password) {
-
     this.masterPassword = password;
-
-    this.data = { 
+    this.data = {
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
     };
-    this.secrets = {
-      /* Store member variables that you intend to be private here
-         (information that an adversary should NOT see). */
-    };
-
-    
-  
+    this.kvs = {}; // Initialize kvs object
   };
 
   /** 
@@ -46,8 +38,8 @@ class Keychain {
     */
   static async init(password) {
     let keychain = new Keychain(password);
+    keychain.kvs = {};
     return keychain;
-    
   };
 
   /**
@@ -65,31 +57,35 @@ class Keychain {
     *   password:           string
     *   repr:               string
     *   trustedDataCheck: string
-    * Return Type: Keychain
+    * Return Type: Keychain or false
     */
   static async load(password, repr, trustedDataCheck) {
-    
-    
-    // integrity check with hash
-    const secretsHash = await subtle.digest(
-      "SHA-256", stringToBuffer(repr));            // extract hash from repr
-    if (bufferToString(secretsHash) !== trustedDataCheck) {         // compare extraced hash with trustedDataCheck
-       throw new Error('checksum not match');
+    try {
+      // Integrity check with hash
+      const secretsHash = await subtle.digest(
+        "SHA-256", stringToBuffer(repr));            // Extract hash from repr
+      if (bufferToString(secretsHash) !== trustedDataCheck) {         // Compare extracted hash with trustedDataCheck
+        throw new Error('checksum not match');
+      }
+  
+      let kvsState = JSON.parse(repr);
+      let newKeychain = new Keychain(password);
+  
+      // Validate the password by comparing the stored hash
+      const storedHashedPassword = kvsState.hashedPassword;
+      const providedHashedPassword = bufferToString(await subtle.digest("SHA-256", stringToBuffer(password)));
+      if (storedHashedPassword !== providedHashedPassword) {
+        throw new Error('password is incorrect'); // Throw an error if the password is incorrect
+      }
+  
+      newKeychain.kvs = kvsState.kvs;
+      return newKeychain;
+    } catch (error) {
+      // Log the error for debugging purposes
+      console.error('Error loading keychain:', error);
+      throw error; // Re-throw the error to be caught by the test
     }
-
-
-    let kvsState = JSON.parse(repr);
-    let newKeychain = new Keychain(kvsState['masterPassword']);
-
-    // password check
-    if (newKeychain.masterPassword !== password){
-      throw new Error('password is wrong');
-    }
-
-    newKeychain.secrets = kvsState['secrets'];
-    return newKeychain;
-    
-  };
+  }
 
   /**
     * Returns a JSON serialization of the contents of the keychain that can be 
@@ -102,17 +98,16 @@ class Keychain {
     * checksum computed over the password manager to preserve integrity.
     *
     * Return Type: array
-    */ 
+    */
   async dump() {
     let arr = new Array();
-    const kvsState = JSON.stringify(this) // convert the json object to string for hash 
-    console.log(kvsState);
+    const hashedPassword = bufferToString(await subtle.digest("SHA-256", stringToBuffer(this.masterPassword)));
+    const kvsState = JSON.stringify({ kvs: this.kvs, hashedPassword }); // convert the json object to string for hash 
     arr.push(kvsState);      // arr[0] -> json encoding of password manager
     let kvsHash = bufferToString(await subtle.digest(
       "SHA-256", stringToBuffer(kvsState))); // SHA-256 hash for checksum 
     arr.push(kvsHash);      // arr[1] -> SHA-256 checksum (as a string)
     return arr;
-    
   };
 
   /**
@@ -125,12 +120,16 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
-    let ret = this.secrets[name];
-    if(ret){
-      return ret;
+    let hmacKey = await this.deriveKeys(this.masterPassword, 'hmac-salt').then(keys => keys.hmacKey);
+    let hashedName = await this.hashDomain(hmacKey, name);
+
+    let encryptedData = this.kvs[hashedName];
+    if (!encryptedData) {
+      return null;
     }
-    else return null;
-    
+
+    let aesKey = await this.deriveKeys(this.masterPassword, 'aes-salt').then(keys => keys.aesKey);
+    return this.decryptPass(aesKey, encryptedData);
   };
 
   /** 
@@ -144,9 +143,13 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    //check if the domain is already exist in kvs
-    this.secrets[name] = value;
-    return;
+    let hmacKey = await this.deriveKeys(this.masterPassword, 'hmac-salt').then(keys => keys.hmacKey);
+    let hashedName = await this.hashDomain(hmacKey, name);
+
+    let aesKey = await this.deriveKeys(this.masterPassword, 'aes-salt').then(keys => keys.aesKey);
+    let encryptedData = await this.encryptPass(aesKey, value);
+
+    this.kvs[hashedName] = encryptedData;
   };
 
   /**
@@ -158,11 +161,47 @@ class Keychain {
     * Return Type: Promise<boolean>
   */
   async remove(name) {
-    if(this.secrets[name]){
-      return delete this.secrets[name];
+    let hmacKey = await this.deriveKeys(this.masterPassword, 'hmac-salt').then(keys => keys.hmacKey);
+    let hashedName = await this.hashDomain(hmacKey, name);
+
+    if (this.kvs[hashedName]) {
+      delete this.kvs[hashedName];
+      return true;
     }
     else return false;
   };
+
+  /**Create key from password**/
+  async deriveKeys(password, salt) {
+    let keyMaterial = await subtle.importKey("raw", stringToBuffer(password), "PBKDF2", false, ["deriveBits"]);
+    let derivedBits = await subtle.deriveBits({ name: "PBKDF2", salt: stringToBuffer(salt), iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, keyMaterial, 512);
+
+    let aesKey = await subtle.importKey("raw", derivedBits.slice(0, 32), "AES-GCM", false, ["encrypt", "decrypt"]);
+    let hmacKey = await subtle.importKey("raw", derivedBits.slice(32), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+
+    return { aesKey, hmacKey };
+  };
+
+  /**Encryption**/
+  async encryptPass(aesKey, plaintext) {
+    let iv = getRandomBytes(12);
+    let encrypted = await subtle.encrypt({ name: "AES-GCM", iv }, aesKey, stringToBuffer(plaintext));
+    return { iv: encodeBuffer(iv), data: encodeBuffer(encrypted) };
+  };
+
+  /**Decyption**/
+  async decryptPass(aesKey, encryptedData) {
+    let iv = decodeBuffer(encryptedData.iv);
+    let data = decodeBuffer(encryptedData.data);
+    let decrypted = await subtle.decrypt({ name: "AES-GCM", iv }, aesKey, data);
+    return bufferToString(decrypted);
+  };
+
+  /*Hide domain name by using HMAC*/
+  async hashDomain(hmacKey, domain) {
+    let hash = await subtle.sign("HMAC", hmacKey, stringToBuffer(domain));
+    return encodeBuffer(hash);
+  };
 };
 
-module.exports = { Keychain }
+module.exports = { Keychain };
