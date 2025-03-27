@@ -24,11 +24,11 @@ class Keychain {
 
     this.masterPassword = password;
 
-    this.data = { 
+    this.data = { // hmac(k,domain_name): enc(passwd) 
       /* Store member variables that you intend to be public here
          (i.e. information that will not compromise security if an adversary sees) */
     };
-    this.secrets = {
+    this.secrets = {  // secret password, key, ... 
       /* Store member variables that you intend to be private here
          (information that an adversary should NOT see). */
     };
@@ -45,9 +45,9 @@ class Keychain {
     * Return Type: 
     */
   static async init(password) {
+    const masterPassword = password;
     let keychain = new Keychain(password);
     return keychain;
-    
   };
 
   /**
@@ -105,9 +105,11 @@ class Keychain {
     */ 
   async dump() {
     let arr = new Array();
+
     const kvsState = JSON.stringify(this) // convert the json object to string for hash 
     console.log(kvsState);
     arr.push(kvsState);      // arr[0] -> json encoding of password manager
+
     let kvsHash = bufferToString(await subtle.digest(
       "SHA-256", stringToBuffer(kvsState))); // SHA-256 hash for checksum 
     arr.push(kvsHash);      // arr[1] -> SHA-256 checksum (as a string)
@@ -125,6 +127,7 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
+    
     let ret = this.secrets[name];
     if(ret){
       return ret;
