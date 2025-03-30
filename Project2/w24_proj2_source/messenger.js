@@ -54,7 +54,6 @@ class MessengerClient {
     const certificate = {
       username: username,
       pub: keyPair.pub,     //public key of the keypair
-      timestamp: Date.now()     //prevent replay attack
     }
 
 
@@ -148,6 +147,7 @@ class MessengerClient {
     const plaintext = bufferToString(bufferPlaintext);
     return plaintext
   }
+
 };
 
 module.exports = {

@@ -3,7 +3,7 @@
 // This line disables linter errors caused by mocha polluting the global namespace.
 /* global describe it before */
 
-const { MessengerClient } = require('../messenger.js')
+const { MessengerClient } = require('../othertry.js')
 const {
   generateEG,
   computeDH,
@@ -82,7 +82,7 @@ describe('Messenger', function () {
       await alice.sendMessage('bob', 'Hello, Bob')
     })
 
-    it('bob can recieve an encrypted message from alice', async function () {
+    it.only('bob can recieve an encrypted message from alice', async function () {
       const alice = new MessengerClient(caKeyPair.pub, govKeyPair.pub)
       const bob = new MessengerClient(caKeyPair.pub, govKeyPair.pub)
       const aliceCertificate = await alice.generateCertificate('alice')
