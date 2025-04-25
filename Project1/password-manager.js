@@ -37,6 +37,7 @@ class Keychain {
     * Return Type: 
     */
   static async init(password) {
+    const masterPassword = password;
     let keychain = new Keychain(password);
     keychain.kvs = {};
     return keychain;
@@ -104,6 +105,7 @@ class Keychain {
     const hashedPassword = bufferToString(await subtle.digest("SHA-256", stringToBuffer(this.masterPassword)));
     const kvsState = JSON.stringify({ kvs: this.kvs, hashedPassword }); // convert the json object to string for hash 
     arr.push(kvsState);      // arr[0] -> json encoding of password manager
+
     let kvsHash = bufferToString(await subtle.digest(
       "SHA-256", stringToBuffer(kvsState))); // SHA-256 hash for checksum 
     arr.push(kvsHash);      // arr[1] -> SHA-256 checksum (as a string)
